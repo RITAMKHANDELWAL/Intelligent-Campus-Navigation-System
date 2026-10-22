@@ -68,7 +68,7 @@ class NavigationController:
             return {"ok": False, "error": err, "status": "error", "message": err}
 
         func = ALGORITHMS[algorithm]
-        active = self.graph.active_view()
+        active = self.graph.full_view()
         result = func(active, source, target)
 
         original, blocked_on_route = None, []

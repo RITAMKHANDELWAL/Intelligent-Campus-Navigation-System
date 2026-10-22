@@ -1319,6 +1319,7 @@ class CampusNavigationApp(ctk.CTk):
         res = resp["result"]
         algo = res["algorithm"]
         c = self.canvas
+        c.clear_anim_overlay()
         c.source, c.target = res["source"], res["target"]
         c.tree_edges = []
         c.node_states = {v: "visited" for v in res["visited"]}
@@ -1341,9 +1342,13 @@ class CampusNavigationApp(ctk.CTk):
         else:
             c.routes.append({"path": res["path"], "color": ROUTE_COLORS[algo], "width": 8, "kind": "main"})
             self.main_paths = [res["path"]]
-            self.set_status("found", "Route Found", resp["message"])
+            self.set_status("found", "Route Found",
+                            f"{fmt_path_inline(res['path'], use_codes=True)}  ·  "
+                            f"{fmt_distance(res['distance'])}  ·  {res['edges']} edges  ({resp['message']})")
         c.render()
         self._write_route_info(resp)
+        self._write_graph_steps(resp, len(res["steps"]) - 1)
+        self._set_live_step(len(res["steps"]) - 1)
         self.tabs.set("Route")
 
     def _write_route_info(self, resp):
@@ -1452,7 +1457,7 @@ class CampusNavigationApp(ctk.CTk):
         self.tabs.set("Route")
 
     def clear_route(self):
-        self._stop_animation()
+        self._cancel_animation_run()
         c = self.canvas
         c.routes, c.node_states, c.visit_order, c.tree_edges = [], {}, [], []
         self.main_paths, self.current_resp, self.anim_resp = [], None, None
@@ -1460,6 +1465,7 @@ class CampusNavigationApp(ctk.CTk):
         self.step_lbl.configure(text="Watch the algorithm explore the campus step by step.")
         self.set_status("idle", "Ready", "Route cleared. Select source, destination and algorithm.")
         self._show_welcome()
+        self._write_graph_steps(None, None)
         if self.viva:
             self.viva.update_view(None, 0, False)
 
@@ -1514,7 +1520,9 @@ class CampusNavigationApp(ctk.CTk):
         resp = self.nav.compare(src, dst)
         if not resp["ok"]:
             self.cmp_sub.configure(text=resp["error"])
+            self.cmp_winner.configure(text="")
             self.cmp_verdict.configure(text="")
+            self.cmp_chart.delete("all")
             return None
         self.cmp_sub.configure(text=f"{src}  →  {dst}"
                                + ("   (blocked roads excluded)" if self.nav.graph.blocked else ""))
@@ -1523,7 +1531,7 @@ class CampusNavigationApp(ctk.CTk):
             ctk.CTkLabel(self.cmp_table, text=h, font=(FONT, 10, "bold"), text_color="white",
                          fg_color=COLORS["navy"], corner_radius=0).grid(row=0, column=j, sticky="nsew")
         self.cmp_table.grid_columnconfigure(1, weight=1)
-        for i, key in enumerate(("bfs", "dijkstra"), start=1):
+        for i, key in enumerate(("bfs", "dfs", "dijkstra"), start=1):
             r = resp[key]
             name = r["algorithm"]
             vals = [name, fmt_path_inline(r["path"], use_codes=True) if r["found"] else "No route",
@@ -1534,20 +1542,52 @@ class CampusNavigationApp(ctk.CTk):
                              text_color=ALGO_COLORS[name] if j == 0 else COLORS["text"],
                              wraplength=150 if j == 1 else 0, justify="left").grid(
                     row=i, column=j, sticky="w", padx=5, pady=4)
-        b, d = resp["bfs"], resp["dijkstra"]
+        b, f, d = resp["bfs"], resp["dfs"], resp["dijkstra"]
+        if d["found"]:
+            self.cmp_winner.configure(
+                text=f"★ Shortest Distance: Dijkstra  ({fmt_distance(d['distance'])}, {d['edges']} edges)\n"
+                     f"   Path: {fmt_path_inline(d['path'], use_codes=True)}")
+        else:
+            self.cmp_winner.configure(text="")
         if not b["found"]:
             verdict = "No route available between the selected locations."
+        elif resp["same_path"] and f["path"] == d["path"]:
+            verdict = (f"All three algorithms choose the SAME route here "
+                       f"({d['edges']} edges, {fmt_distance(d['distance'])}).")
         elif resp["same_path"]:
-            verdict = (f"Both algorithms choose the SAME route here "
-                       f"({b['edges']} edges, {fmt_distance(b['distance'])}).")
+            verdict = (f"BFS and Dijkstra choose the SAME shortest route "
+                       f"({d['edges']} edges, {fmt_distance(d['distance'])}); "
+                       f"DFS uses {f['edges']} edges ({fmt_distance(f['distance'])}).")
         else:
             verdict = (f"Different routes!  BFS uses {b['edges']} edges ({fmt_distance(b['distance'])}); "
+                       f"DFS uses {f['edges']} edges ({fmt_distance(f['distance'])}); "
                        f"Dijkstra uses {d['edges']} edges ({fmt_distance(d['distance'])}). "
-                       f"Dijkstra saves {fmt_distance(b['distance'] - d['distance'])} – "
+                       f"Dijkstra saves {fmt_distance(b['distance'] - d['distance'])} vs BFS – "
                        f"fewer edges does not mean shorter distance.")
         self.cmp_verdict.configure(text=verdict)
+        self._draw_cmp_chart(b, f, d)
         self._cmp_resp = resp
         return resp
+
+    def _draw_cmp_chart(self, b, f, d):
+        cv = self.cmp_chart
+        cv.delete("all")
+        W = max(cv.winfo_width(), 320)
+        rows = [("BFS", b, ALGO_COLORS["BFS"]),
+                ("DFS", f, ALGO_COLORS["DFS"]),
+                ("Dijkstra", d, ALGO_COLORS["Dijkstra"])]
+        dists = [r["distance"] for _, r, _ in rows if r["found"] and math.isfinite(r["distance"])]
+        max_d = max(dists) if dists else 1
+        cv.create_text(10, 14, text="Total Distance Comparison (m)", anchor="w",
+                       font=(FONT, 9, "bold"), fill=COLORS["navy"])
+        for idx, (name, r, col) in enumerate(rows):
+            y = 36 + idx * 36
+            cv.create_text(10, y + 10, text=name, anchor="w", font=(FONT, 10, "bold"), fill=col)
+            if r["found"] and math.isfinite(r["distance"]):
+                bw = max(12, int((W - 155) * (r["distance"] / max_d)))
+                cv.create_rectangle(75, y, 75 + bw, y + 20, fill=col, outline="")
+                cv.create_text(82 + bw, y + 10, text=f"{fmt_distance(r['distance'])} ({r['edges']}e)",
+                               anchor="w", font=(FONT, 9, "bold"), fill=COLORS["text"])
 
     def show_compare_on_map(self):
         resp = self.update_compare()
@@ -1555,23 +1595,26 @@ class CampusNavigationApp(ctk.CTk):
             src, dst = self.get_selection()
             self._validate_or_warn(src, dst)
             return
-        self._show_two_routes(resp["bfs"], resp["dijkstra"])
+        self._show_two_routes(resp["bfs"], resp["dijkstra"], resp.get("dfs"))
 
-    def _show_two_routes(self, b, d):
-        self._stop_animation()
+    def _show_two_routes(self, b, d, f=None):
+        self._cancel_animation_run()
         c = self.canvas
         c.source, c.target = b["source"], b["target"]
         c.node_states, c.visit_order, c.tree_edges = {}, [], []
         c.routes = []
+        if f and f["found"]:
+            c.routes.append({"path": f["path"], "color": ROUTE_COLORS["DFS"], "width": 10, "kind": "dim"})
         if d["found"]:
             c.routes.append({"path": d["path"], "color": ROUTE_COLORS["Dijkstra"], "width": 8, "kind": "main"})
         if b["found"]:
             c.routes.append({"path": b["path"], "color": ROUTE_COLORS["BFS"], "width": 4, "kind": "main"})
-        self.main_paths = [p for p in (b["path"], d["path"]) if p]
+        self.main_paths = [p for p in (b["path"], d["path"], f["path"] if f else None) if p]
         c.render()
+        dfs_txt = f"   ·   Purple = DFS ({f['edges']} edges, {fmt_distance(f['distance'])})" if (f and f["found"]) else ""
         self.set_status("info", "Comparison on map",
                         f"Blue = BFS ({b['edges']} edges, {fmt_distance(b['distance'])})   ·   "
-                        f"Green = Dijkstra ({d['edges']} edges, {fmt_distance(d['distance'])})")
+                        f"Green = Dijkstra ({d['edges']} edges, {fmt_distance(d['distance'])}){dfs_txt}")
 
     def _fill_graph_type_text(self):
         ex = self.nav.disagreement_example()
@@ -1662,20 +1705,33 @@ class CampusNavigationApp(ctk.CTk):
         if step["current"]:
             states[step["current"]] = "current"
         c = self.canvas
+        c.clear_anim_overlay()
         c.source, c.target = res["source"], res["target"]
         c.node_states = states
         c.visit_order = list(step["visited"])
         c.tree_edges = [(p, v) for v, p in step["parents"].items() if p]
+        cur = step.get("current")
+        par = step["parents"].get(cur) if cur else None
+        if cur and par:
+            c.anim_active_edge = (par, cur)
+            c.anim_frac = 1.0
+            c.marker_on = True
+        if cur:
+            c.pulse_node = cur
         last = i == len(steps) - 1
         if last:
             self._display_route(resp)            # final route + info panel
             c.tree_edges = [(p, v) for v, p in step["parents"].items() if p]
+            if res["found"] and len(res["path"]) >= 2:
+                c.anim_trail = list(zip(res["path"], res["path"][1:]))
             c.render()
         else:
             c.routes = []
             self.main_paths = []
             c.render()
         self.step_lbl.configure(text=f"Step {i + 1}/{len(steps)} — {step['action']}")
+        self._set_live_step(i)
+        self._write_graph_steps(resp, i)
         if self.viva:
             self.viva.update_view(resp, i, self.anim_playing)
 
@@ -1699,13 +1755,14 @@ class CampusNavigationApp(ctk.CTk):
             self.viva.update_view(self.anim_resp, self.anim_index, self.anim_playing)
 
     def reset_animation(self):
-        self._stop_animation()
+        self._cancel_animation_run()
         self.anim_index = 0
         c = self.canvas
         c.node_states, c.visit_order, c.tree_edges, c.routes = {}, [], [], []
         self.main_paths = []
         c.render()
         self.step_lbl.configure(text="Animation reset. Press ANIMATE ALGORITHM or RESUME to start.")
+        self._set_live_step(None)
         if self.anim_resp:
             self.pause_btn.configure(text="▶ RESUME")
             self.set_status("idle", "Animation reset", "Press RESUME to replay the exploration.")
@@ -1788,6 +1845,7 @@ class CampusNavigationApp(ctk.CTk):
                 ("TRAVERSAL LOG\n", "h2"),
                 ("Run Find Route, Animate or Next Step to see how the selected "
                  "algorithm walks the adjacency list, step by step.\n", "muted")])
+            self.graph_route_lbl.configure(text="Final route: —")
             return
         res = resp["result"]
         steps = res["steps"]
@@ -1797,6 +1855,14 @@ class CampusNavigationApp(ctk.CTk):
         for k in range(i + 1):
             ch.append((f"{k + 1:>2}. ", "monob"))
             ch.append((steps[k]["action"] + "\n", "orange" if k == i else "mono"))
+        if i == len(steps) - 1 and res["found"]:
+            ch.append(("\nFINAL PATH (from algorithm):\n", "label"))
+            ch.append((f"{fmt_path_inline(res['path'])}  ({fmt_distance(res['distance'])}, {res['edges']} edges)\n", "route"))
+            self.graph_route_lbl.configure(
+                text=f"Final route ({res['algorithm']}): {fmt_path_inline(res['path'], use_codes=True)}  "
+                     f"·  {fmt_distance(res['distance'])}  ·  {res['edges']} edges")
+        else:
+            self.graph_route_lbl.configure(text="Final route: (stepping...)")
         write_rich(self.adj_txt, ch)
         self.adj_txt.see("end")
 
