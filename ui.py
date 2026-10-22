@@ -1745,3 +1745,83 @@ class CampusNavigationApp(ctk.CTk):
         self.current_resp, self.current_kind = self.anim_resp, "route"
         self.show_step(0)
         self.set_status("anim", "Viva Mode", "Use Next / Prev in the Viva window to step through the algorithm.")
+
+    # =========================================================================
+    # REPAIR BLOCK (prompt 2) – append-only.
+    # The previous round left four members referenced but never defined
+    # (next_step, _set_live_step, _write_graph_steps, gt_txt), which made the
+    # app crash at start-up. They are defined here; no existing line changed.
+    # =========================================================================
+    @property
+    def gt_txt(self):
+        """Text widget for the weighted/unweighted example (Compare tab), created lazily."""
+        w = self.__dict__.get("_gt_txt_widget")
+        if w is None:
+            w = make_text(self.cmp_title.master, height=14)
+            w.pack(fill="x", pady=4)
+            self.__dict__["_gt_txt_widget"] = w
+        return w
+
+    def _set_live_step(self, i):
+        """Fill the LIVE STEP box for step index i (None = idle)."""
+        resp = self.anim_resp
+        if i is None or not resp:
+            self.live_lbl.configure(text="Step — of —\nCurrent node: —\nFrontier: —")
+            return
+        res = resp["result"]
+        steps = res["steps"]
+        i = max(0, min(i, len(steps) - 1))
+        step = steps[i]
+        if res["algorithm"] == "Dijkstra":
+            frontier = ", ".join(f"({d:g}, {short(v)})" for d, v in step["frontier"])
+        else:
+            frontier = ", ".join(short(v) for v in step["frontier"])
+        self.live_lbl.configure(
+            text=f"Step {i + 1} of {len(steps)}\n"
+                 f"Current node: {step['current'] or '—'}\n"
+                 f"Frontier: {frontier or '(empty)'}\n{step['action']}")
+
+    def _write_graph_steps(self, resp, i):
+        """Graph tab: traversal log up to step i (resp None = placeholder)."""
+        if not resp:
+            write_rich(self.adj_txt, [
+                ("TRAVERSAL LOG\n", "h2"),
+                ("Run Find Route, Animate or Next Step to see how the selected "
+                 "algorithm walks the adjacency list, step by step.\n", "muted")])
+            return
+        res = resp["result"]
+        steps = res["steps"]
+        i = max(0, min(len(steps) - 1 if i is None else i, len(steps) - 1))
+        ch = [(f"TRAVERSAL LOG – {res['algorithm']}\n", "h2"),
+              (f"{res['source']} → {res['target']}\n\n", "muted")]
+        for k in range(i + 1):
+            ch.append((f"{k + 1:>2}. ", "monob"))
+            ch.append((steps[k]["action"] + "\n", "orange" if k == i else "mono"))
+        write_rich(self.adj_txt, ch)
+        self.adj_txt.see("end")
+
+    def next_step(self):
+        """Advance the algorithm by exactly one step (prepares it if needed)."""
+        src, dst = self.get_selection()
+        resp = self.anim_resp
+        stale = (not resp or resp["result"]["source"] != src or resp["result"]["target"] != dst
+                 or resp["result"]["algorithm"] != self.algo_var.get())
+        if stale:
+            if self._validate_or_warn(src, dst):
+                return
+            self._cancel_animation_run()
+            self.anim_resp = self.nav.find_route(src, dst, self.algo_var.get())
+            self.current_resp, self.current_kind = self.anim_resp, "route"
+            self.tabs.set("Route")
+            self.set_status("anim", f"Stepping {self.algo_var.get()}",
+                            "Press NEXT STEP to advance one step at a time.")
+            self.show_step(0)
+            return
+        self._stop_animation()
+        self.pause_btn.configure(text="▶ RESUME")
+        last = len(resp["result"]["steps"]) - 1
+        if self.anim_index >= last:
+            self.set_status("anim", "Restarting steps", "Reached the end – starting again from step 1.")
+            self.show_step(0)
+        else:
+            self.show_step(self.anim_index + 1)
